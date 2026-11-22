@@ -1,9 +1,83 @@
-
+from json_repair import repair_json
 import json
 import streamlit as st
 
 from agent.llm_setup import llm
 from agent.travel_agent import travel_agent
+
+
+def content_to_text(content):
+    """Convert an LLM response into plain text."""
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+
+        for item in content:
+            if isinstance(item, dict):
+                text_part = item.get("text", "")
+
+                if text_part:
+                    parts.append(text_part)
+
+            elif isinstance(item, str):
+                parts.append(item)
+
+        return "\n".join(parts)
+
+    return str(content)
+
+
+
+def convert_to_json(travel_plan):
+    prompt = f"""
+    Convert the following travel plan into valid JSON.
+
+    Return ONLY a JSON object.
+    Do not include Markdown, explanations, or code fences.
+    Use double quotes for all property names and string values.
+    Use numbers for numeric values.
+    Use empty arrays [] when information is unavailable.
+    
+    Required structure:
+    {{
+        "trip_summary": {{
+            "source": "",
+            "destination": "",
+            "duration_days": 0
+        }},
+        "flight_recommendation": {{}},
+        "hotel_recommendation": {{}},
+        "places_to_visit": [],
+        "weather_forecast": [],
+        "day_wise_itinerary": [],
+        "budget_breakdown": {{
+            "flight_cost": 0,
+            "hotel_cost": 0,
+            "local_expenses": 0,
+            "total_budget": 0
+        }}
+    }}
+
+    Travel plan:
+    {travel_plan}
+    """
+
+    response = llm.invoke(prompt)
+    content = response.content
+
+    if isinstance(content, list):
+        content = "".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in content
+        )
+
+    content = content.strip()
+
+    return json.loads(repair_json(content))
+
 
 
 st.set_page_config(
@@ -68,9 +142,11 @@ with st.form("travel_form"):
 if submitted:
 
     if not source.strip() or not destination.strip():
+
         st.error("Please enter both source and destination cities.")
 
     elif source.strip().lower() == destination.strip().lower():
+
         st.error("Source and destination must be different.")
 
     else:
@@ -83,6 +159,7 @@ if submitted:
         Minimum hotel star rating: {min_stars}.
 
         Use the available tools to:
+
         1. Find and compare the cheapest and fastest flights.
         2. Recommend suitable hotels within the hotel price limit.
         3. Find highly rated tourist attractions.
@@ -96,24 +173,31 @@ if submitted:
         Clearly state if the estimated budget exceeds my maximum budget.
         """
 
-        with st.spinner("Your AI travel agent is planning your trip..."):
+        with st.spinner(
+            "Your AI travel agent is planning your trip..."
+        ):
 
             try:
 
                 # Generate human-readable travel plan
                 response = travel_agent.invoke({
                     "messages": [
-                        {"role": "user", "content": query}
+                        {
+                            "role": "user",
+                            "content": query
+                        }
                     ]
                 })
 
-                answer = response["messages"][-1].content
+                answer = content_to_text(
+                    response["messages"][-1].content
+                )
 
-                # Convert travel plan into structured JSON
+                # Generate structured JSON
                 json_prompt = f"""
-                Convert the following travel plan into valid JSON.
+                Convert the travel plan below into one valid JSON object.
 
-                Use this structure:
+                Follow this exact structure:
 
                 {{
                     "trip_summary": {{
@@ -137,19 +221,39 @@ if submitted:
                 Travel plan:
                 {answer}
 
-                Return only valid JSON.
-                Do not invent missing values.
-                Use null or empty arrays when information is unavailable.
+                Rules:
+                - Return only a valid JSON object.
+                - Do not use Markdown code fences.
+                - Do not add explanations outside the JSON.
+                - Do not invent missing information.
+                - Use null or empty arrays when information is unavailable.
                 """
 
                 json_response = llm.invoke(json_prompt)
 
+                # Convert response into JSON
                 try:
-                    structured_data = json.loads(json_response.content)
 
-                except json.JSONDecodeError:
+                    structured_data = convert_to_json(
+                        json_response.content
+                    )
+
+                except (json.JSONDecodeError, TypeError, ValueError) as json_error:
+
+                    st.warning(
+                        "The travel plan was generated, but its "
+                        "structured JSON conversion failed."
+                    )
+
+                    st.caption(f"JSON conversion detail: {json_error}")
+
                     structured_data = {
-                        "formatting_error": "Could not convert response into valid JSON",
+                        "trip_summary": {
+                            "source": source,
+                            "destination": destination,
+                            "duration_days": trip_days
+                        },
+                        "json_conversion_error": str(json_error),
                         "travel_plan": answer
                     }
 
@@ -159,7 +263,7 @@ if submitted:
                 st.subheader("🌍 Your AI-Generated Travel Plan")
                 st.markdown(answer)
 
-                # Display JSON result
+                # Display structured JSON
                 st.divider()
 
                 st.subheader("📦 Structured JSON Output")
@@ -168,10 +272,17 @@ if submitted:
                 # Download JSON
                 st.download_button(
                     label="Download Travel Plan JSON",
-                    data=json.dumps(structured_data, indent=4),
+                    data=json.dumps(
+                        structured_data,
+                        indent=4,
+                        ensure_ascii=False
+                    ),
                     file_name="travel_plan.json",
                     mime="application/json"
                 )
 
             except Exception as error:
-                st.error(f"Unable to generate travel plan: {error}")
+
+                st.error(
+                    f"Unable to generate travel plan: {error}"
+                )
